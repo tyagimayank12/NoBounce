@@ -1,28 +1,34 @@
-# main.py
-import os
 from typing import Dict, Any
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, Response  # Changed this line
 import pandas as pd
 from io import BytesIO
-from email_validator import EmailValidator
 import uvicorn
+from email_validator import EmailValidator
+import os
 
-app = FastAPI(title="NoBounce - Email Validator")
+app = FastAPI(
+    title="NoBounce - Email Validator",
+    description="API for validating email addresses",
+    version="1.0.0"
+)
 
 # Initialize validator with your AWS IP
 validator = EmailValidator(ips=['13.61.64.236'])
 
 
-@app.get("/")
+@app.get("/", response_model=Dict[str, str])
 async def read_root() -> Dict[str, str]:
     return {"message": "NoBounce Email Validator API is running"}
 
 
 @app.post("/validate-emails")
-async def validate_emails(file: UploadFile = File(...)) -> StreamingResponse:
+async def validate_emails(file: UploadFile = File(...)) -> Response:  # Changed return type
     if not file.filename.endswith(('.xls', '.xlsx', '.csv')):
-        raise HTTPException(status_code=400, detail="Only Excel (.xls, .xlsx) and CSV files are supported")
+        raise HTTPException(
+            status_code=400,
+            detail="Only Excel (.xls, .xlsx) and CSV files are supported"
+        )
 
     try:
         contents = await file.read()
@@ -33,7 +39,10 @@ async def validate_emails(file: UploadFile = File(...)) -> StreamingResponse:
             df = pd.read_excel(BytesIO(contents))
 
         if 'Email' not in df.columns:
-            raise HTTPException(status_code=400, detail="File must contain an 'Email' column")
+            raise HTTPException(
+                status_code=400,
+                detail="File must contain an 'Email' column"
+            )
 
         results = []
         for email in df['Email'].values:
@@ -58,8 +67,8 @@ async def validate_emails(file: UploadFile = File(...)) -> StreamingResponse:
 
         output.seek(0)
 
-        return StreamingResponse(
-            output,
+        return Response(
+            content=output.getvalue(),
             media_type=media_type,
             headers={'Content-Disposition': f'attachment; filename={filename}'}
         )
@@ -69,4 +78,5 @@ async def validate_emails(file: UploadFile = File(...)) -> StreamingResponse:
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
