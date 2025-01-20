@@ -2,14 +2,18 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import Response
 import pandas as pd
 from io import BytesIO
-from email_validator import EmailValidator
 import os
+import sys
+from pathlib import Path
+
+# Add the current directory to the path
+sys.path.append(str(Path(__file__).parent))
+from email_validator import EmailValidator
 
 app = FastAPI()
 
 # Initialize validator with your AWS IP
 validator = EmailValidator(ips=['13.61.64.236'])
-
 
 @app.get("/")
 def read_root():

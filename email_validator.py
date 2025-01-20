@@ -25,8 +25,9 @@ class EmailValidationResult:
 
 
 class EmailValidator:
-    def __init__(self, max_connections=5):
-        self.cache: Dict[str, str] = {}
+    def __init__(self, ips=None):  # Add this parameter
+        self.ips = ips if ips is not None else []
+        self.cache = {}
         self.lock = Lock()
         self.email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
 
