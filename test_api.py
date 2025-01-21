@@ -1,64 +1,71 @@
 import requests
-import os
-import pandas as pd
-from io import StringIO  # Add this import
+import time
+import sys
 
 
-def test_api():
-    # API endpoint
-    url = "https://nobounce-production.up.railway.app/validate-emails"
+def test_email_validation(is_local=True):
+    # Use local URL for testing
+    base_url = "http://0.0.0.0:8000" if is_local else "https://nobounce-production.up.railway.app"
+    url = f"{base_url}/validate-emails"
 
-    file_path = "/Users/mayanktyagi/PycharmProjects/NoBounce/TestBounce.csv"
-
-    if not os.path.exists(file_path):
-        print(f"❌ Error: File not found: {file_path}")
-        return
+    # Your test file
+    file_path = "TestBounce.csv"  # Make sure this file exists
 
     try:
-        files = {
-            'file': ('TestBounce.csv', open(file_path, 'rb'), 'text/csv')
-        }
+        # Check if file exists
+        with open(file_path, 'rb') as test_file:
+            # Send file for validation
+            print(f"Sending file to {url}...")
+            files = {
+                'file': (file_path, test_file, 'text/csv')
+            }
 
-        print("Sending request...")
-        response = requests.post(url, files=files)
+            # Add timeout and retry logic
+            max_retries = 3
+            retry_count = 0
 
-        if response.status_code == 200:
-            # Read the response into a DataFrame
-            df = pd.read_csv(StringIO(response.content.decode('utf-8')))
+            while retry_count < max_retries:
+                try:
+                    response = requests.post(url, files=files)
 
-            # Filter to keep only Valid emails
-            valid_emails = df[df['Status'].isin(['Valid', 'Free Email Provider', 'Custom Domain Email'])]
+                    if response.status_code == 200:
+                        result = response.json()
+                        validation_id = result['validation_id']
+                        print("\nValidation Results:")
+                        print(f"Validation ID: {validation_id}")
+                        print(f"Stats: {result['stats']}")
 
-            # Save filtered results
-            output_file = 'clean_email_list.csv'
-            valid_emails.to_csv(output_file, index=False)
+                        # Download both refined and discarded lists
+                        for file_type in ['refined', 'discarded']:
+                            download_url = f"{base_url}/download/{validation_id}/{file_type}"
+                            download = requests.get(download_url)
 
-            # Print statistics
-            print("\n=== Email Validation Results ===")
-            print(f"Total emails processed: {len(df)}")
-            print(f"Valid emails: {len(valid_emails)}")
-            print(f"Removed emails: {len(df) - len(valid_emails)}")
-            print("\nBreakdown of invalid emails:")
-            invalid_counts = df[~df['Status'].isin(['Valid', 'Free Email Provider', 'Custom Domain Email'])][
-                'Status'].value_counts()
-            for status, count in invalid_counts.items():
-                print(f"{status}: {count}")
-
-            print(f"\n✅ Clean email list saved to {output_file}")
-            print(f"File location: {os.path.abspath(output_file)}")
-
-            # Save invalid emails to a separate file
-            invalid_emails = df[~df['Status'].isin(['Valid', 'Free Email Provider', 'Custom Domain Email'])]
-            invalid_emails.to_csv('invalid_emails.csv', index=False)
-            print(f"Invalid emails saved to: invalid_emails.csv")
-
-        else:
-            print(f"❌ Error: {response.status_code}")
-            print(response.text)
-
+                            if download.status_code == 200:
+                                filename = f"test_{file_type}.csv"
+                                with open(filename, 'wb') as f:
+                                    f.write(download.content)
+                                print(f"\nDownloaded {file_type} list to {filename}")
+                            else:
+                                print(f"\nError downloading {file_type} list: {download.status_code}")
+                        break
+                    else:
+                        print(f"Error: {response.status_code}")
+                        print(response.text)
+                        break
+                except requests.exceptions.ConnectionError:
+                    retry_count += 1
+                    if retry_count == max_retries:
+                        print("Error: Could not connect to server. Make sure the server is running.")
+                        print("Run 'uvicorn main:app --reload --host 0.0.0.0 --port 8000' first.")
+                        sys.exit(1)
+                    print(f"Connection failed. Retrying ({retry_count}/{max_retries})...")
+                    time.sleep(2)  # Wait 2 seconds before retrying
+    except FileNotFoundError:
+        print(f"Error: Test file '{file_path}' not found. Please make sure the file exists.")
     except Exception as e:
-        print(f"❌ Error occurred: {str(e)}")
+        print(f"Error occurred: {str(e)}")
 
 
 if __name__ == "__main__":
-    test_api()
+    print("Testing locally...")
+    test_email_validation(is_local=True)
