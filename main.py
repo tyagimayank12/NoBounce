@@ -1,54 +1,73 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import Response
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi.responses import Response, HTMLResponse, FileResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 import pandas as pd
-from io import BytesIO
-import os
-import sys
-from pathlib import Path
-
-# Add the current directory to the path
-sys.path.append(str(Path(__file__).parent))
+from io import BytesIO, StringIO
 from email_validator import EmailValidator
+import os
 
 app = FastAPI()
 
-# Initialize validator with your AWS IP
+# Set up templates
+templates = Jinja2Templates(directory="templates")
+
+# Initialize validator
 validator = EmailValidator(ips=['13.61.64.236'])
 
-@app.get("/")
-def read_root():
-    return {"message": "NoBounce Email Validator API is running"}
+
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.post("/validate-emails")
 async def validate_emails(file: UploadFile = File(...)):
     try:
         contents = await file.read()
-        df = pd.read_csv(BytesIO(contents)) if file.filename.endswith('.csv') else pd.read_excel(BytesIO(contents))
+
+        # Handle different file types
+        if file.filename.endswith('.csv'):
+            df = pd.read_csv(BytesIO(contents))
+        else:
+            df = pd.read_excel(BytesIO(contents))
+
+        if 'Email' not in df.columns:
+            raise HTTPException(status_code=400, detail="File must contain an 'Email' column")
 
         results = []
         for email in df['Email'].values:
             results.append(validator.validate_email(email))
 
-        output = BytesIO()
-        results_df = pd.DataFrame({'Email': df['Email'], 'Status': results})
+        # Create results DataFrame
+        results_df = pd.DataFrame({
+            'Email': df['Email'],
+            'Status': results
+        })
 
+        # Filter valid emails
+        valid_emails = results_df[results_df['Status'].isin(['Valid', 'Free Email Provider', 'Custom Domain Email'])]
+
+        # Create output file
+        output = BytesIO()
         if file.filename.endswith('.csv'):
-            output_str = results_df.to_csv(index=False)
+            output_str = valid_emails.to_csv(index=False)
             output = BytesIO(output_str.encode())
             media_type = 'text/csv'
-            filename = 'validation_results.csv'
+            filename = 'valid_emails.csv'
         else:
-            results_df.to_excel(output, index=False)
+            valid_emails.to_excel(output, index=False)
             media_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            filename = 'validation_results.xlsx'
+            filename = 'valid_emails.xlsx'
 
         output.seek(0)
+
         return Response(
             content=output.getvalue(),
             media_type=media_type,
             headers={'Content-Disposition': f'attachment; filename={filename}'}
         )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
