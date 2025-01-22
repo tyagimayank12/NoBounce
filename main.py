@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timedelta
 from email_validator import EmailValidator
 import logging
+from ip_pool import IPPool
 from pathlib import Path
 
 # Configure logging
@@ -27,7 +28,12 @@ UPLOAD_DIR = os.path.join(tempfile.gettempdir(), 'nobounce_uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Initialize validator
-validator = EmailValidator(ips=['13.61.64.236'])
+validator = EmailValidator([
+    '13.61.64.236',
+    '13.60.65.138',
+    '13.61.100.159',
+    '13.53.128.166'
+])
 
 
 # Database initialization
@@ -227,6 +233,19 @@ async def health_check():
         "timestamp": datetime.now().isoformat(),
         "service": "NoBounce Email Validator"
     }
+
+@app.get("/status")
+async def get_status():
+    """Get IP pool status"""
+    try:
+        status = validator.ip_pool.get_status()
+        return {
+            "status": "online",
+            "ip_pool": status,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from threading import Lock
 import time
 import logging
 from typing import Dict, Set
+from ip_pool import IPPool
 
 
 class EmailValidationResult:
@@ -25,8 +26,8 @@ class EmailValidationResult:
 
 
 class EmailValidator:
-    def __init__(self, ips=None):  # Add this parameter
-        self.ips = ips if ips is not None else []
+    def __init__(self, ips=None):
+        self.ip_pool = IPPool(ips)  # Initialize IP pool
         self.cache = {}
         self.lock = Lock()
         self.email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
@@ -127,11 +128,17 @@ class EmailValidator:
         server = None
 
         try:
+            # Get IP from pool
+            current_ip = self.ip_pool.get_next_ip()
+
             mx_records = dns.resolver.resolve(domain, 'MX')
             mx_record = str(mx_records[0].exchange)
 
             server = smtplib.SMTP(timeout=10)
             server.set_debuglevel(0)
+
+            # Use IP from pool
+            server.source_address = (current_ip, 0)
 
             server.connect(mx_record)
             server.ehlo_or_helo_if_needed()
@@ -141,15 +148,6 @@ class EmailValidator:
             server.quit()
             return code == 250
 
-        except smtplib.SMTPServerDisconnected:
-            self.logger.warning(f"SMTP server disconnected for {email}")
-            return False
-        except smtplib.SMTPResponseException as e:
-            if e.smtp_code == 550:
-                self.logger.info(f"Email address does not exist: {email}")
-            elif e.smtp_code == 554:
-                self.logger.warning(f"SMTP transaction failed for {email}")
-            return False
         except Exception as e:
             self.logger.error(f"SMTP Error for {email}: {str(e)}")
             return False
