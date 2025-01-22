@@ -219,6 +219,15 @@ async def startup_event():
     init_db()
     cleanup_old_files()  # Initial cleanup
 
+@app.get("/")
+async def health_check():
+    return {
+        "status": "online",
+        "message": "NoBounce Email Validator API is running",
+        "timestamp": datetime.now().isoformat(),
+        "service": "NoBounce Email Validator"
+    }
+
 
 if __name__ == "__main__":
     import uvicorn
