@@ -12,6 +12,8 @@ from email_validator import EmailValidator
 import logging
 from ip_pool import IPPool
 from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 # Configure logging
 logging.basicConfig(
@@ -22,6 +24,14 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI
 app = FastAPI(title="NoBounce Email Validator API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 # Configure storage
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), 'nobounce_uploads')
