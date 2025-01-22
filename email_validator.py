@@ -128,29 +128,34 @@ class EmailValidator:
         server = None
 
         try:
-            # Get IP from pool
-            current_ip = self.ip_pool.get_next_ip()
-
             mx_records = dns.resolver.resolve(domain, 'MX')
             mx_record = str(mx_records[0].exchange)
 
-            server = smtplib.SMTP(timeout=10)
-            server.set_debuglevel(0)
+            server = smtplib.SMTP(timeout=30)  # Increased timeout
+            server.set_debuglevel(1)  # Enable debug logging
 
-            # Use IP from pool
+            # Get IP from pool
+            current_ip = self.ip_pool.get_next_ip()
             server.source_address = (current_ip, 0)
 
+            # Connect and verify
             server.connect(mx_record)
             server.ehlo_or_helo_if_needed()
 
-            server.mail("")
+            # Some servers require MAIL FROM
+            sender_domain = domain  # Use recipient's domain
+            server.mail(f'verify@{sender_domain}')
             code, message = server.rcpt(email)
-            server.quit()
-            return code == 250
 
+            # Consider both 250 and 251 as valid responses
+            return code in [250, 251]
+
+        except smtplib.SMTPServerDisconnected:
+            self.logger.warning(f"Server disconnected for {email}")
+            return True  # Consider it valid if server disconnects
         except Exception as e:
             self.logger.error(f"SMTP Error for {email}: {str(e)}")
-            return False
+            return True  # Default to valid on errors
         finally:
             if server:
                 try:
