@@ -159,52 +159,39 @@ class EmailValidator:
                     pass
 
     def validate_email(self, email: str) -> str:
-        """
-        Comprehensive email validation with multiple checks.
-        Returns a string indicating the validation result.
-        """
         with self.lock:
             if email in self.cache:
                 return self.cache[email]
 
         try:
-            # Basic checks
+            domain = email.split('@')[1]
+
+            # Check for basic validations first
             if not self.is_valid_syntax(email):
                 result = EmailValidationResult.INVALID_SYNTAX
-            elif not self.has_valid_length(email):
-                result = EmailValidationResult.INVALID_LENGTH
+            elif not self.has_valid_mx_records(domain):
+                result = f"Invalid Domain: No MX Records for {domain}"
+            elif self.is_disposable_email(domain):
+                result = f"Disposable Email: {domain}"
+            elif self.is_role_based(email):
+                result = f"Role Based Email: {email}"
             else:
-                # Domain specific checks
-                domain = email.split('@')[1]
-
-                if not self.has_valid_domain_parts(domain):
-                    result = EmailValidationResult.INVALID_DOMAIN
-                elif not self.has_valid_mx_records(domain):
-                    result = EmailValidationResult.INVALID_DOMAIN
-                elif self.is_disposable_email(domain):
-                    result = EmailValidationResult.DISPOSABLE_EMAIL
-                elif self.is_role_based(email):
-                    result = EmailValidationResult.ROLE_BASED
-                else:
-                    # Check for typos
-                    has_typo, correct_domain = self.check_for_typos(domain)
-                    if has_typo:
-                        result = f"{EmailValidationResult.TYPO_DOMAIN} (Did you mean {correct_domain}?)"
-                    # Provider type check
-                    elif self.is_free_email(domain):
-                        if not self.smtp_handshake(email):
-                            result = EmailValidationResult.SMTP_FAILED
-                        else:
+                # SMTP verification
+                try:
+                    if self.smtp_handshake(email):
+                        if self.is_free_email(domain):
                             result = EmailValidationResult.FREE_EMAIL
-                    else:
-                        if not self.smtp_handshake(email):
-                            result = EmailValidationResult.SMTP_FAILED
                         else:
                             result = EmailValidationResult.CUSTOM_DOMAIN
+                    else:
+                        result = f"SMTP Verification Failed for: {email}"
+                except Exception as smtp_error:
+                    self.logger.error(f"SMTP Error for {email}: {str(smtp_error)}")
+                    result = f"SMTP Connection Error: {str(smtp_error)}"
 
         except Exception as e:
             self.logger.error(f"Validation error for {email}: {str(e)}")
-            result = str(e)
+            result = f"Validation Error: {str(e)}"
 
         with self.lock:
             self.cache[email] = result
