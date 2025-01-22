@@ -29,19 +29,38 @@ class EmailValidator:
         try:
             mx_records = dns.resolver.resolve(domain, 'MX')
             mx_record = str(mx_records[0].exchange)
+
+            self.logger.info(f"Starting SMTP check for {email} using MX: {mx_record}")
+
             server = smtplib.SMTP(timeout=30)
+            server.set_debuglevel(1)  # Enable detailed SMTP debug logs
+
+            self.logger.info("Connecting to server...")
             server.connect(mx_record)
+
+            self.logger.info("Sending EHLO...")
             server.ehlo()
-            server.mail('verify@' + domain)
-            code, _ = server.rcpt(email)
+
+            self.logger.info("Sending MAIL FROM...")
+            from_addr = f"verify@{domain}"
+            server.mail(from_addr)
+
+            self.logger.info("Sending RCPT TO...")
+            code, message = server.rcpt(email)
+
+            self.logger.info(f"Response code: {code}, Message: {message}")
+
             return code in [250, 251, 252]
+
         except Exception as e:
-            self.logger.error(f"SMTP Error for {email}: {str(e)}")
-            return True
+            self.logger.error(f"SMTP Error for {email}: {type(e).__name__}: {str(e)}")
+            return True  # Consider valid if check fails
         finally:
             if server:
-                try: server.quit()
-                except: pass
+                try:
+                    server.quit()
+                except:
+                    pass
 
     def validate_email(self, email: str) -> str:
         try:
