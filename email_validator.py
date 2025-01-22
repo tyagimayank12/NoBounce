@@ -169,34 +169,36 @@ class EmailValidator:
                 return self.cache[email]
 
         try:
-            domain = email.split('@')[1]
-
-            # Check for basic validations first
+            # Step 1: Basic Validation
             if not self.is_valid_syntax(email):
                 result = EmailValidationResult.INVALID_SYNTAX
-            elif not self.has_valid_mx_records(domain):
-                result = f"Invalid Domain: No MX Records for {domain}"
-            elif self.is_disposable_email(domain):
-                result = f"Disposable Email: {domain}"
+                return result
+
+            domain = email.split('@')[1]
+
+            # Step 2: Domain and MX Record Check
+            if not self.has_valid_mx_records(domain):
+                result = EmailValidationResult.INVALID_DOMAIN
+                return result
+
+            # Step 3: SMTP Handshake
+            if not self.smtp_handshake(email):
+                result = EmailValidationResult.SMTP_FAILED
+                return result
+
+            # Step 4: Additional Checks for Valid Emails
+            if self.is_disposable_email(domain):
+                result = EmailValidationResult.DISPOSABLE_EMAIL
             elif self.is_role_based(email):
-                result = f"Role Based Email: {email}"
+                result = EmailValidationResult.ROLE_BASED
+            elif self.is_free_email(domain):
+                result = EmailValidationResult.FREE_EMAIL
             else:
-                # SMTP verification
-                try:
-                    if self.smtp_handshake(email):
-                        if self.is_free_email(domain):
-                            result = EmailValidationResult.FREE_EMAIL
-                        else:
-                            result = EmailValidationResult.CUSTOM_DOMAIN
-                    else:
-                        result = f"SMTP Verification Failed for: {email}"
-                except Exception as smtp_error:
-                    self.logger.error(f"SMTP Error for {email}: {str(smtp_error)}")
-                    result = f"SMTP Connection Error: {str(smtp_error)}"
+                result = EmailValidationResult.VALID
 
         except Exception as e:
             self.logger.error(f"Validation error for {email}: {str(e)}")
-            result = f"Validation Error: {str(e)}"
+            result = str(e)
 
         with self.lock:
             self.cache[email] = result
