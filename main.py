@@ -1,3 +1,5 @@
+from collections import Counter
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import Response
 from typing import Dict, Any
@@ -243,6 +245,16 @@ async def health_check():
         "timestamp": datetime.now().isoformat(),
         "service": "NoBounce Email Validator"
     }
+
+
+@app.get("/validation-stats")
+async def get_stats():
+    return {
+        "total_checked": len(validator.cache),
+        "valid_ratio": sum(1 for v in validator.cache.values() if v == 'Valid') / len(validator.cache) if validator.cache else 0,
+        "failure_types": Counter(validator.cache.values())
+    }
+
 
 @app.get("/status")
 async def get_status():
