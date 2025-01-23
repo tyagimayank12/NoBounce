@@ -27,40 +27,56 @@ class EmailValidator:
         domain = email.split('@')[1]
         server = None
         try:
-            mx_records = dns.resolver.resolve(domain, 'MX')
-            mx_record = str(mx_records[0].exchange)
+            # Get MX records and sort by preference
+            mx_records = sorted(dns.resolver.resolve(domain, 'MX'),
+                                key=lambda x: x.preference)
 
-            self.logger.info(f"Starting SMTP check for {email} using MX: {mx_record}")
+            # Try each MX server until one works
+            for mx in mx_records:
+                mx_host = str(mx.exchange).rstrip('.')
+                try:
+                    server = smtplib.SMTP(timeout=10)
+                    server.set_debuglevel(1)  # Enable logging
 
-            server = smtplib.SMTP(timeout=30)
-            server.set_debuglevel(1)  # Enable detailed SMTP debug logs
+                    # Connect and say hello
+                    server.connect(mx_host)
+                    server.ehlo()
 
-            self.logger.info("Connecting to server...")
-            server.connect(mx_record)
+                    # Some servers require specific sender domains
+                    server.mail(f'postmaster@{domain}')
+                    code, message = server.rcpt(email)
 
-            self.logger.info("Sending EHLO...")
-            server.ehlo()
+                    # Consider specific response codes
+                    if code == 250:  # OK
+                        return True
+                    elif code == 451:  # Temporary local error
+                        return True
+                    elif code == 421:  # Service not available
+                        continue
+                    elif code in [550, 553, 551, 554]:  # Various rejected cases
+                        return False
 
-            self.logger.info("Sending MAIL FROM...")
-            from_addr = f"verify@{domain}"
-            server.mail(from_addr)
+                    return code in [250, 251, 252, 253]
 
-            self.logger.info("Sending RCPT TO...")
-            code, message = server.rcpt(email)
+                except smtplib.SMTPServerDisconnected:
+                    continue
+                except smtplib.SMTPResponseException as e:
+                    if e.smtp_code == 554:
+                        return False
+                    continue
+                except Exception as e:
+                    continue
+                finally:
+                    if server:
+                        try:
+                            server.quit()
+                        except:
+                            pass
 
-            self.logger.info(f"Response code: {code}, Message: {message}")
-
-            return code in [250, 251, 252]
+            return True  # If we can't verify, assume valid
 
         except Exception as e:
-            self.logger.error(f"SMTP Error for {email}: {type(e).__name__}: {str(e)}")
-            return True  # Consider valid if check fails
-        finally:
-            if server:
-                try:
-                    server.quit()
-                except:
-                    pass
+            return True  # If DNS fails, assume valid
 
     def validate_email(self, email: str) -> str:
         try:
