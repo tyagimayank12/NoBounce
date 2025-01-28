@@ -10,6 +10,9 @@ import os
 import tempfile
 import uuid
 from datetime import datetime, timedelta
+
+from starlette.responses import FileResponse
+
 from email_validator import EmailValidator
 import logging
 from ip_pool import IPPool
@@ -102,23 +105,15 @@ def cleanup_old_files():
 
 
 @app.post("/validate-emails")
-async def validate_emails(file: UploadFile = File(...)) -> Dict[str, Any]:
+async def validate_emails(file: UploadFile = File(...)):
     try:
-        logger.info(f"Processing file: {file.filename}")
-        validation_id = str(uuid.uuid4())
-
-        # Read file content
         contents = await file.read()
 
-        # Determine file type and read accordingly
-        try:
-            if file.filename.endswith(('.xlsx', '.xls')):
-                df = pd.read_excel(BytesIO(contents))
-            else:
-                df = pd.read_csv(BytesIO(contents))
-        except Exception as e:
-            logger.error(f"File reading error: {str(e)}")
-            raise HTTPException(status_code=400, detail="Invalid file format or corrupted file")
+        # Read the input file
+        if file.filename.endswith('.csv'):
+            df = pd.read_csv(BytesIO(contents))
+        else:
+            df = pd.read_excel(BytesIO(contents))
 
         if 'Email' not in df.columns:
             raise HTTPException(status_code=400, detail="File must contain an 'Email' column")
@@ -126,110 +121,65 @@ async def validate_emails(file: UploadFile = File(...)) -> Dict[str, Any]:
         # Process emails
         results = []
         for email in df['Email'].values:
-            try:
-                results.append(validator.validate_email(email))
-            except Exception as e:
-                logger.error(f"Validation error for {email}: {str(e)}")
-                results.append("Error: Invalid Email")
+            result = validator.validate_email(email)
+            results.append(result)
 
+        # Create DataFrames for valid and invalid emails
         results_df = pd.DataFrame({
             'Email': df['Email'],
-            'Status': results
+            'Status': [r['details'][0] if r['details'] else 'Valid' for r in results]
         })
 
-        # Split into valid and invalid emails
-        valid_emails = results_df[
-            results_df['Status'].isin(['Valid', 'Free Email Provider', 'Custom Domain Email'])
-        ]
-        invalid_emails = results_df[
-            ~results_df['Status'].isin(['Valid', 'Free Email Provider', 'Custom Domain Email'])
-        ]
+        valid_emails = results_df[results_df['Status'] == 'Valid']
+        invalid_emails = results_df[results_df['Status'] != 'Valid']
 
-        # Generate filenames
-        original_name = os.path.splitext(file.filename)[0]
-        refined_filename = f"Refined - {original_name}.csv"
-        discarded_filename = f"Discarded - {original_name}.csv"
+        # Create both files
+        refined_output = BytesIO()
+        discarded_output = BytesIO()
 
-        # Save files
-        refined_path = os.path.join(UPLOAD_DIR, f"{validation_id}_{refined_filename}")
-        discarded_path = os.path.join(UPLOAD_DIR, f"{validation_id}_{discarded_filename}")
+        if file.filename.endswith('.csv'):
+            valid_emails.to_csv(refined_output, index=False)
+            invalid_emails.to_csv(discarded_output, index=False)
+            media_type = 'text/csv'
+        else:
+            valid_emails.to_excel(refined_output, index=False)
+            invalid_emails.to_excel(discarded_output, index=False)
+            media_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
-        valid_emails.to_csv(refined_path, index=False)
-        invalid_emails.to_csv(discarded_path, index=False)
+        refined_output.seek(0)
+        discarded_output.seek(0)
 
-        # Store in database
-        stats = {
+        # Return stats
+        return {
             "total_emails": len(df),
             "valid_emails": len(valid_emails),
-            "invalid_emails": len(invalid_emails)
-        }
-
-        db_path = os.path.join(UPLOAD_DIR, 'email_validation.db')
-        conn = sqlite3.connect(db_path)
-        c = conn.cursor()
-        c.execute(
-            """INSERT INTO validation_files 
-               (id, original_filename, refined_path, discarded_path, created_at, stats) 
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (validation_id, file.filename, refined_path, discarded_path,
-             datetime.now(), str(stats))
-        )
-        conn.commit()
-        conn.close()
-
-        logger.info(f"Processing completed for {file.filename}")
-        return {
-            "validation_id": validation_id,
-            "message": "Email validation completed successfully",
-            "stats": stats
+            "invalid_emails": len(invalid_emails),
+            "refined_file_url": f"/download/refined/{file.filename}",
+            "discarded_file_url": f"/download/discarded/{file.filename}"
         }
 
     except Exception as e:
-        logger.error(f"Processing error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/download/{validation_id}/{file_type}")
-async def download_file(validation_id: str, file_type: str):
+@app.get("/download/{type}/{filename}")
+async def download_file(type: str, filename: str):
+    if type not in ['refined', 'discarded']:
+        raise HTTPException(status_code=400, detail="Invalid file type")
+
     try:
-        db_path = os.path.join(UPLOAD_DIR, 'email_validation.db')
-        conn = sqlite3.connect(db_path)
-        c = conn.cursor()
-        c.execute("""SELECT refined_path, discarded_path, original_filename 
-                    FROM validation_files WHERE id = ?""", (validation_id,))
-        result = c.fetchone()
-        conn.close()
-
-        if not result:
-            raise HTTPException(status_code=404, detail="Validation ID not found")
-
-        refined_path, discarded_path, original_name = result
-
-        if file_type == "refined":
-            file_path = refined_path
-            filename = f"Refined - {original_name}"
-        elif file_type == "discarded":
-            file_path = discarded_path
-            filename = f"Discarded - {original_name}"
-        else:
-            raise HTTPException(status_code=400, detail="Invalid file type")
-
+        file_path = f"{type}_{filename}"
         if not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
 
-        with open(file_path, "rb") as file:
-            content = file.read()
-
-        return Response(
-            content=content,
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        return FileResponse(
+            file_path,
+            filename=f"{type}_{filename}",
+            media_type='text/csv' if filename.endswith(
+                '.csv') else 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
-
     except Exception as e:
-        logger.error(f"Download error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.on_event("startup")
 async def startup_event():
