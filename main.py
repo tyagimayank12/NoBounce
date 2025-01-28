@@ -109,7 +109,6 @@ async def validate_emails(file: UploadFile = File(...)):
     try:
         contents = await file.read()
 
-        # Read the input file
         if file.filename.endswith('.csv'):
             df = pd.read_csv(BytesIO(contents))
         else:
@@ -118,49 +117,56 @@ async def validate_emails(file: UploadFile = File(...)):
         if 'Email' not in df.columns:
             raise HTTPException(status_code=400, detail="File must contain an 'Email' column")
 
-        # Process emails
-        results = []
-        for email in df['Email'].values:
-            result = validator.validate_email(email)
-            results.append(result)
+        results = [validator.validate_email(email) for email in df['Email'].values]
 
-        # Create DataFrames for valid and invalid emails
-        results_df = pd.DataFrame({
-            'Email': df['Email'],
-            'Status': [r['details'][0] if r['details'] else 'Valid' for r in results]
-        })
+        valid_emails = []
+        invalid_emails = []
+        for email, result in zip(df['Email'], results):
+            if result.get('valid', False):
+                valid_emails.append({'Email': email, 'Status': 'Valid'})
+            else:
+                invalid_emails.append({'Email': email, 'Status': result.get('details', ['Invalid'])[0]})
 
-        valid_emails = results_df[results_df['Status'] == 'Valid']
-        invalid_emails = results_df[results_df['Status'] != 'Valid']
-
-        # Create both files
-        refined_output = BytesIO()
-        discarded_output = BytesIO()
+        valid_df = pd.DataFrame(valid_emails)
+        invalid_df = pd.DataFrame(invalid_emails)
 
         if file.filename.endswith('.csv'):
-            valid_emails.to_csv(refined_output, index=False)
-            invalid_emails.to_csv(discarded_output, index=False)
+            valid_output = BytesIO()
+            invalid_output = BytesIO()
+            valid_df.to_csv(valid_output, index=False, encoding='utf-8')
+            invalid_df.to_csv(invalid_output, index=False, encoding='utf-8')
             media_type = 'text/csv'
         else:
-            valid_emails.to_excel(refined_output, index=False)
-            invalid_emails.to_excel(discarded_output, index=False)
+            valid_output = BytesIO()
+            invalid_output = BytesIO()
+            valid_df.to_excel(valid_output, index=False)
+            invalid_df.to_excel(invalid_output, index=False)
             media_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
-        refined_output.seek(0)
-        discarded_output.seek(0)
+        valid_output.seek(0)
+        invalid_output.seek(0)
 
-        # Return stats
         return {
-            "total_emails": len(df),
-            "valid_emails": len(valid_emails),
-            "invalid_emails": len(invalid_emails),
-            "refined_file_url": f"/download/refined/{file.filename}",
-            "discarded_file_url": f"/download/discarded/{file.filename}"
+            'status': 'success',
+            'valid_emails': {
+                'content': valid_output.getvalue().decode() if media_type == 'text/csv' else valid_output.getvalue(),
+                'filename': f'valid_{file.filename}',
+                'media_type': media_type
+            },
+            'invalid_emails': {
+                'content': invalid_output.getvalue().decode() if media_type == 'text/csv' else invalid_output.getvalue(),
+                'filename': f'invalid_{file.filename}',
+                'media_type': media_type
+            },
+            'stats': {
+                'total': len(df),
+                'valid': len(valid_emails),
+                'invalid': len(invalid_emails)
+            }
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/download/{type}/{filename}")
 async def download_file(type: str, filename: str):
