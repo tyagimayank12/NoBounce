@@ -86,6 +86,7 @@ class EmailValidator:
         server = None
 
         def get_mx_or_a_records(domain_name, retry_count=3):
+            """Get MX records with fallback to A records"""
             for attempt in range(retry_count):
                 try:
                     mx_records = dns.resolver.resolve(domain_name, 'MX')
@@ -99,82 +100,83 @@ class EmailValidator:
                         self.logger.warning(f"A record lookup failed for {domain_name}: {str(e)}")
                 except Exception as e:
                     self.logger.warning(f"DNS lookup attempt {attempt + 1} failed: {str(e)}")
-                    if attempt < retry_count - 1:
-                        time.sleep(retry_delay)
                     continue
             return []
 
-        for retry in range(max_retries):
-            try:
-                mail_servers = get_mx_or_a_records(domain)
-                if not mail_servers:
-                    self.logger.error(f"No mail servers found for {domain}")
-                    return False
+        def get_sender_addresses(domain_name):
+            """Generate sender addresses"""
+            return [
+                f'verify@{domain_name}',
+                f'postmaster@{domain_name}',
+                ''  # Empty sender
+            ]
 
-                for preference, mx_host in mail_servers:
+        try:
+            mail_servers = get_mx_or_a_records(domain)
+            if not mail_servers:
+                self.logger.error(f"No mail servers found for {domain}")
+                return False
+
+            for preference, mx_host in mail_servers:
+                try:
+                    connection = self.ip_pool.get_connection()
+                    server = smtplib.SMTP(timeout=30)
+
+                    if connection['type'] == 'proxy':
+                        proxies = {
+                            'http': connection['config']['url'],
+                            'https': connection['config']['url']
+                        }
+                        session = requests.Session()
+                        session.proxies = proxies
+
+                    # Connect and HELO
                     try:
-                        connection = self.ip_pool.get_connection()
-                        server = smtplib.SMTP(timeout=30)
+                        server.connect(mx_host)
+                        server.helo('verifier.com')
+                        if server.has_extn('STARTTLS'):
+                            server.starttls()
+                            server.helo('verifier.com')
+                    except Exception as e:
+                        self.logger.error(f"Connection error for {email}: {str(e)}")
+                        continue
 
-                        if connection['type'] == 'proxy':
-                            proxies = {
-                                'http': connection['config']['url'],
-                                'https': connection['config']['url']
-                            }
-                            session = requests.Session()
-                            session.proxies = proxies
-
-                        # Connect with a simple HELO first
+                    # Try different sender addresses but be strict about response
+                    for sender in get_sender_addresses(domain):
                         try:
-                            server.connect(mx_host)
-                            server.helo('verifier.com')  # Use a simple, valid hostname
-
-                            # Try STARTTLS if available
-                            if server.has_extn('STARTTLS'):
-                                server.starttls()
-                                server.helo('verifier.com')
-                        except Exception as e:
-                            self.logger.error(f"Connection error for {email}: {str(e)}")
-                            continue
-
-                        # Try verification with empty MAIL FROM
-                        try:
-                            server.mail('')
+                            server.mail(sender)
                             code, message = server.rcpt(email)
 
-                            self.logger.info(f"SMTP response for {email}: Code={code}, Message={message}")
+                            self.logger.info(
+                                f"SMTP response for {email} using {sender}: "
+                                f"Code={code}, Message={message}"
+                            )
 
-                            if code in [250, 251, 252]:  # Success
+                            # Only accept explicit success (code 250)
+                            if code == 250:
                                 return True
-                            elif code in [450, 451, 452]:  # Temporary failure
-                                time.sleep(retry_delay)
-                                continue
-                            elif code == 421:  # Service not available
-                                break  # Try next server
                             elif code in [550, 551, 553, 554]:  # Permanent failure
                                 return False
 
                         except smtplib.SMTPException as e:
-                            self.logger.warning(f"SMTP error for {email}: {str(e)}")
+                            self.logger.warning(
+                                f"SMTP error with {sender} for {email}: {str(e)}"
+                            )
                             continue
 
-                    except Exception as e:
-                        self.logger.error(f"Server error for {mx_host}: {str(e)}")
-                        continue
-                    finally:
-                        if server:
-                            try:
-                                server.quit()
-                            except:
-                                pass
+                except Exception as e:
+                    self.logger.error(f"Server error for {mx_host}: {str(e)}")
+                    continue
+                finally:
+                    if server:
+                        try:
+                            server.quit()
+                        except:
+                            pass
 
-                time.sleep(retry_delay)
-
-            except Exception as e:
-                self.logger.error(f"Attempt {retry + 1} failed for {email}: {str(e)}")
-                if retry < max_retries - 1:
-                    time.sleep(retry_delay)
-                continue
+        except Exception as e:
+            self.logger.error(f"Verification failed for {email}: {str(e)}")
+            return False
 
         return False
 
