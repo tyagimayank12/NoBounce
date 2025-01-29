@@ -86,7 +86,6 @@ class EmailValidator:
         server = None
 
         def get_mx_or_a_records(domain_name, retry_count=3):
-            """Get MX records with fallback to A records"""
             for attempt in range(retry_count):
                 try:
                     mx_records = dns.resolver.resolve(domain_name, 'MX')
@@ -104,16 +103,6 @@ class EmailValidator:
                         time.sleep(retry_delay)
                     continue
             return []
-
-        def get_sender_addresses(domain_name):
-            """Generate sender addresses"""
-            return [
-                f'verify@{domain_name}',
-                f'no-reply@{domain_name}',
-                f'postmaster@{domain_name}',
-                'verify@verifier.com',
-                ''
-            ]
 
         for retry in range(max_retries):
             try:
@@ -135,45 +124,39 @@ class EmailValidator:
                             session = requests.Session()
                             session.proxies = proxies
 
-                        # Connect and EHLO
+                        # Connect with a simple HELO first
                         try:
                             server.connect(mx_host)
-                            server.ehlo(f"verifier.{domain}")
+                            server.helo('verifier.com')  # Use a simple, valid hostname
+
+                            # Try STARTTLS if available
                             if server.has_extn('STARTTLS'):
                                 server.starttls()
-                                server.ehlo(f"verifier.{domain}")
+                                server.helo('verifier.com')
                         except Exception as e:
                             self.logger.error(f"Connection error for {email}: {str(e)}")
                             continue
 
-                        # Try different sender addresses
-                        sender_addresses = get_sender_addresses(domain)
-                        for sender in sender_addresses:
-                            try:
-                                server.mail(sender)
-                                code, message = server.rcpt(email)
+                        # Try verification with empty MAIL FROM
+                        try:
+                            server.mail('')
+                            code, message = server.rcpt(email)
 
-                                self.logger.info(
-                                    f"SMTP response for {email} using {sender}: "
-                                    f"Code={code}, Message={message}"
-                                )
+                            self.logger.info(f"SMTP response for {email}: Code={code}, Message={message}")
 
-                                # Handle response codes
-                                if code in [250, 251, 252]:  # Success
-                                    return True
-                                elif code in [450, 451, 452]:  # Temporary failure
-                                    time.sleep(retry_delay)
-                                    continue
-                                elif code in [421]:  # Service not available
-                                    break  # Try next server
-                                elif code in [550, 551, 553, 554]:  # Permanent failure
-                                    return False
-
-                            except smtplib.SMTPException as e:
-                                self.logger.warning(
-                                    f"SMTP error with {sender} for {email}: {str(e)}"
-                                )
+                            if code in [250, 251, 252]:  # Success
+                                return True
+                            elif code in [450, 451, 452]:  # Temporary failure
+                                time.sleep(retry_delay)
                                 continue
+                            elif code == 421:  # Service not available
+                                break  # Try next server
+                            elif code in [550, 551, 553, 554]:  # Permanent failure
+                                return False
+
+                        except smtplib.SMTPException as e:
+                            self.logger.warning(f"SMTP error for {email}: {str(e)}")
+                            continue
 
                     except Exception as e:
                         self.logger.error(f"Server error for {mx_host}: {str(e)}")
