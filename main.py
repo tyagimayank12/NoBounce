@@ -1,5 +1,5 @@
+import time
 from collections import Counter
-
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import Response
 from typing import Dict, Any
@@ -10,9 +10,7 @@ import os
 import tempfile
 import uuid
 from datetime import datetime, timedelta
-
 from starlette.responses import FileResponse
-
 from email_validator import EmailValidator
 import logging
 from ip_pool import IPPool
@@ -104,12 +102,16 @@ def cleanup_old_files():
         logger.error(f"Cleanup error: {str(e)}")
 
 
+
+TEMP_DIR = tempfile.mkdtemp()
+
+
 @app.post("/validate-emails")
 async def validate_emails(file: UploadFile = File(...)):
     try:
         contents = await file.read()
 
-        # Read the input file
+        # Read input file
         if file.filename.endswith('.csv'):
             df = pd.read_csv(BytesIO(contents))
         else:
@@ -134,17 +136,18 @@ async def validate_emails(file: UploadFile = File(...)):
         valid_emails = results_df[results_df['Status'] == 'Valid']
         invalid_emails = results_df[results_df['Status'] != 'Valid']
 
-        # Generate filenames
-        original_name = os.path.splitext(file.filename)[0]
-        refined_filename = f"Refined - {original_name}.csv"
-        discarded_filename = f"Discarded - {original_name}.csv"
+        # Generate validation ID
+        validation_id = str(uuid.uuid4())
 
-        # Save files
-        valid_emails.to_csv(refined_filename, index=False)
-        invalid_emails.to_csv(discarded_filename, index=False)
+        # Save files with validation ID
+        refined_path = os.path.join(TEMP_DIR, f"{validation_id}_refined.csv")
+        discarded_path = os.path.join(TEMP_DIR, f"{validation_id}_discarded.csv")
+
+        valid_emails.to_csv(refined_path, index=False)
+        invalid_emails.to_csv(discarded_path, index=False)
 
         return {
-            "validation_id": str(uuid.uuid4()),
+            "validation_id": validation_id,
             "message": "Email validation completed",
             "stats": {
                 "total_emails": len(df),
@@ -160,34 +163,42 @@ async def validate_emails(file: UploadFile = File(...)):
 @app.get("/download/{validation_id}/{file_type}")
 async def download_file(validation_id: str, file_type: str):
     try:
-        # Get original filename from the request
-        original_name = "TestBounce"  # You might want to store this with validation_id
-
-        if file_type == "refined":
-            filename = f"Refined - {original_name}.csv"
-        elif file_type == "discarded":
-            filename = f"Discarded - {original_name}.csv"
-        else:
+        if file_type not in ['refined', 'discarded']:
             raise HTTPException(status_code=400, detail="Invalid file type")
 
-        if not os.path.exists(filename):
+        file_path = os.path.join(TEMP_DIR, f"{validation_id}_{file_type}.csv")
+
+        if not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
 
         return FileResponse(
-            filename,
-            media_type='text/csv',
-            filename=filename
+            path=file_path,
+            filename=f"{'Refined' if file_type == 'refined' else 'Discarded'} - results.csv",
+            media_type='text/csv'
         )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# Clean up old files periodically
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database and start cleanup task"""
-    init_db()
-    cleanup_old_files()  # Initial cleanup
+    def cleanup_old_files():
+        while True:
+            time.sleep(3600)  # Check every hour
+            current_time = time.time()
+            for filename in os.listdir(TEMP_DIR):
+                file_path = os.path.join(TEMP_DIR, filename)
+                if current_time - os.path.getmtime(file_path) > 86400:  # 24 hours
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
 
+    import threading
+    cleanup_thread = threading.Thread(target=cleanup_old_files, daemon=True)
+    cleanup_thread.start()
 @app.get("/")
 async def health_check():
     return {
