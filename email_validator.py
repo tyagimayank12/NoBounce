@@ -1,4 +1,7 @@
+import random
 import re
+import time
+
 import dns.resolver
 import smtplib
 import socket
@@ -78,71 +81,146 @@ class EmailValidator:
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
 
-    def smtp_handshake(self, email: str) -> bool:
+    def smtp_handshake(self, email: str, max_retries=3, retry_delay=2) -> bool:
         domain = email.split('@')[1]
         server = None
 
-        try:
-            mx_records = dns.resolver.resolve(domain, 'MX')
-            mx_records = sorted(mx_records, key=lambda x: x.preference)
-
-            for mx in mx_records:
-                mx_host = str(mx.exchange).rstrip('.')
+        def get_mx_or_a_records(domain_name, retry_count=3):
+            """Get MX records with fallback to A records and retry mechanism"""
+            for attempt in range(retry_count):
                 try:
-                    connection = self.ip_pool.get_connection()
-                    proxies = {
-                        'http': connection['config']['url'],
-                        'https': connection['config']['url']
-                    }
+                    # Try MX records first
+                    mx_records = dns.resolver.resolve(domain_name, 'MX')
+                    records = [(rec.preference, str(rec.exchange).rstrip('.')) for rec in mx_records]
+                    return sorted(records, key=lambda x: x[0])
+                except dns.resolver.NoAnswer:
+                    try:
+                        # Fallback to A records
+                        a_records = dns.resolver.resolve(domain_name, 'A')
+                        return [(10, str(rec)) for rec in a_records]  # Default preference 10
+                    except Exception as e:
+                        self.logger.warning(f"A record lookup failed for {domain_name}: {str(e)}")
+                except Exception as e:
+                    self.logger.warning(f"DNS lookup attempt {attempt + 1} failed: {str(e)}")
+                    if attempt < retry_count - 1:
+                        time.sleep(retry_delay)
+                    continue
+            return []
 
-                    session = requests.Session()
-                    session.proxies = proxies
-                    server = smtplib.SMTP(timeout=30)
+        def get_sender_addresses(domain_name):
+            """Generate diverse sender addresses"""
+            timestamp = int(time.time())
+            random_id = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=8))
+            return [
+                f'verify-{random_id}@{domain_name}',
+                f'no-reply-{timestamp}@{domain_name}',
+                f'postmaster@{domain_name}',
+                'verify@verifier.com',
+                ''
+            ]
 
-                    server.set_debuglevel(1)
-                    server.connect(mx_host)
-                    server.ehlo()
+        def custom_ehlo(server, domain_name):
+            """Custom EHLO handling"""
+            try:
+                server.ehlo(domain_name)
+                if server.has_extn('STARTTLS'):
+                    server.starttls()
+                    server.ehlo(domain_name)
+                return True
+            except Exception as e:
+                self.logger.error(f"EHLO error for {domain_name}: {str(e)}")
+                return False
 
-                    # Try different sender addresses
-                    sender_addresses = [
-                        f'noreply@{domain}',
-                        'verify@verify.com',
-                        ''
-                    ]
+        for retry in range(max_retries):
+            try:
+                mail_servers = get_mx_or_a_records(domain)
+                if not mail_servers:
+                    self.logger.error(f"No mail servers found for {domain}")
+                    return False
 
-                    for sender in sender_addresses:
-                        try:
-                            server.mail(sender)
-                            code, message = server.rcpt(email)
+                for preference, mx_host in mail_servers:
+                    try:
+                        connection = self.ip_pool.get_connection()
+                        server = smtplib.SMTP(timeout=30)
 
-                            self.logger.info(f"SMTP response for {email}: Code={code}, Message={message}")
-
-                            if code == 250:
-                                return True
-                            if code in [421, 450, 451]:
+                        # Configure proxy if using one
+                        if connection['type'] == 'proxy':
+                            try:
+                                proxies = {
+                                    'http': connection['config']['url'],
+                                    'https': connection['config']['url']
+                                }
+                                session = requests.Session()
+                                session.proxies = proxies
+                            except Exception as e:
+                                self.logger.error(f"Proxy setup failed: {str(e)}")
                                 continue
-                            if code in [550, 551, 553, 554]:
-                                return False
 
-                        except smtplib.SMTPException as e:
-                            self.logger.debug(f"SMTP error with sender {sender}: {str(e)}")
+                        # Connect with retry
+                        for connect_retry in range(3):
+                            try:
+                                server.connect(mx_host)
+                                break
+                            except (socket.timeout, smtplib.SMTPConnectError) as e:
+                                if connect_retry == 2:
+                                    raise
+                                time.sleep(retry_delay)
+                                continue
+
+                        # Custom EHLO
+                        if not custom_ehlo(server, domain):
                             continue
 
-                except Exception as e:
-                    self.logger.error(f"Connection error for {email}: {str(e)}")
-                    continue
-                finally:
-                    if server:
-                        try:
-                            server.quit()
-                        except:
-                            pass
+                        # Try different sender addresses
+                        sender_addresses = get_sender_addresses(domain)
+                        for sender in sender_addresses:
+                            try:
+                                server.mail(sender)
+                                code, message = server.rcpt(email)
 
-            return False
+                                # Log response
+                                self.logger.info(
+                                    f"SMTP response for {email} using {sender}: "
+                                    f"Code={code}, Message={message}"
+                                )
 
-        except Exception as e:
-            self.logger.error(f"DNS error for {email}: {str(e)}")
-            return False
+                                # Handle response codes
+                                if code in [250, 251, 252]:  # Success
+                                    return True
+                                elif code in [450, 451, 452]:  # Temporary failure
+                                    time.sleep(retry_delay)
+                                    continue
+                                elif code in [421]:  # Service not available
+                                    break  # Try next server
+                                elif code in [550, 551, 553, 554]:  # Permanent failure
+                                    return False
+
+                            except smtplib.SMTPException as e:
+                                self.logger.warning(
+                                    f"SMTP error with {sender} for {email}: {str(e)}"
+                                )
+                                continue
+
+                    except Exception as e:
+                        self.logger.error(f"Server error for {mx_host}: {str(e)}")
+                        continue
+                    finally:
+                        if server:
+                            try:
+                                server.quit()
+                            except:
+                                pass
+
+                # If we get here, try again after delay
+                time.sleep(retry_delay)
+
+            except Exception as e:
+                self.logger.error(f"Attempt {retry + 1} failed for {email}: {str(e)}")
+                if retry < max_retries - 1:
+                    time.sleep(retry_delay)
+                continue
+
+        return False
 
     def validate_email(self, email: str) -> dict:
         """Return detailed validation results"""
