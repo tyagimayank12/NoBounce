@@ -86,18 +86,16 @@ class EmailValidator:
         server = None
 
         def get_mx_or_a_records(domain_name, retry_count=3):
-            """Get MX records with fallback to A records and retry mechanism"""
+            """Get MX records with fallback to A records"""
             for attempt in range(retry_count):
                 try:
-                    # Try MX records first
                     mx_records = dns.resolver.resolve(domain_name, 'MX')
                     records = [(rec.preference, str(rec.exchange).rstrip('.')) for rec in mx_records]
                     return sorted(records, key=lambda x: x[0])
                 except dns.resolver.NoAnswer:
                     try:
-                        # Fallback to A records
                         a_records = dns.resolver.resolve(domain_name, 'A')
-                        return [(10, str(rec)) for rec in a_records]  # Default preference 10
+                        return [(10, str(rec)) for rec in a_records]
                     except Exception as e:
                         self.logger.warning(f"A record lookup failed for {domain_name}: {str(e)}")
                 except Exception as e:
@@ -108,28 +106,14 @@ class EmailValidator:
             return []
 
         def get_sender_addresses(domain_name):
-            """Generate diverse sender addresses"""
-            timestamp = int(time.time())
-            random_id = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=8))
+            """Generate sender addresses"""
             return [
-                f'verify-{random_id}@{domain_name}',
-                f'no-reply-{timestamp}@{domain_name}',
+                f'verify@{domain_name}',
+                f'no-reply@{domain_name}',
                 f'postmaster@{domain_name}',
                 'verify@verifier.com',
                 ''
             ]
-
-        def custom_ehlo(server, domain_name):
-            """Custom EHLO handling"""
-            try:
-                server.ehlo(domain_name)
-                if server.has_extn('STARTTLS'):
-                    server.starttls()
-                    server.ehlo(domain_name)
-                return True
-            except Exception as e:
-                self.logger.error(f"EHLO error for {domain_name}: {str(e)}")
-                return False
 
         for retry in range(max_retries):
             try:
@@ -143,32 +127,23 @@ class EmailValidator:
                         connection = self.ip_pool.get_connection()
                         server = smtplib.SMTP(timeout=30)
 
-                        # Configure proxy if using one
                         if connection['type'] == 'proxy':
-                            try:
-                                proxies = {
-                                    'http': connection['config']['url'],
-                                    'https': connection['config']['url']
-                                }
-                                session = requests.Session()
-                                session.proxies = proxies
-                            except Exception as e:
-                                self.logger.error(f"Proxy setup failed: {str(e)}")
-                                continue
+                            proxies = {
+                                'http': connection['config']['url'],
+                                'https': connection['config']['url']
+                            }
+                            session = requests.Session()
+                            session.proxies = proxies
 
-                        # Connect with retry
-                        for connect_retry in range(3):
-                            try:
-                                server.connect(mx_host)
-                                break
-                            except (socket.timeout, smtplib.SMTPConnectError) as e:
-                                if connect_retry == 2:
-                                    raise
-                                time.sleep(retry_delay)
-                                continue
-
-                        # Custom EHLO
-                        if not custom_ehlo(server, domain):
+                        # Connect and EHLO
+                        try:
+                            server.connect(mx_host)
+                            server.ehlo(f"verifier.{domain}")
+                            if server.has_extn('STARTTLS'):
+                                server.starttls()
+                                server.ehlo(f"verifier.{domain}")
+                        except Exception as e:
+                            self.logger.error(f"Connection error for {email}: {str(e)}")
                             continue
 
                         # Try different sender addresses
@@ -178,7 +153,6 @@ class EmailValidator:
                                 server.mail(sender)
                                 code, message = server.rcpt(email)
 
-                                # Log response
                                 self.logger.info(
                                     f"SMTP response for {email} using {sender}: "
                                     f"Code={code}, Message={message}"
@@ -211,7 +185,6 @@ class EmailValidator:
                             except:
                                 pass
 
-                # If we get here, try again after delay
                 time.sleep(retry_delay)
 
             except Exception as e:
