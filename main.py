@@ -109,6 +109,7 @@ async def validate_emails(file: UploadFile = File(...)):
     try:
         contents = await file.read()
 
+        # Read the input file
         if file.filename.endswith('.csv'):
             df = pd.read_csv(BytesIO(contents))
         else:
@@ -117,73 +118,67 @@ async def validate_emails(file: UploadFile = File(...)):
         if 'Email' not in df.columns:
             raise HTTPException(status_code=400, detail="File must contain an 'Email' column")
 
-        results = [validator.validate_email(email) for email in df['Email'].values]
+        # Process emails
+        results = []
+        for email in df['Email'].values:
+            result = validator.validate_email(email)
+            results.append(result)
 
-        valid_emails = []
-        invalid_emails = []
-        for email, result in zip(df['Email'], results):
-            if result.get('valid', False):
-                valid_emails.append({'Email': email, 'Status': 'Valid'})
-            else:
-                invalid_emails.append({'Email': email, 'Status': result.get('details', ['Invalid'])[0]})
+        # Create results DataFrame
+        results_df = pd.DataFrame({
+            'Email': df['Email'],
+            'Status': [r['details'][0] if r['details'] else 'Valid' for r in results]
+        })
 
-        valid_df = pd.DataFrame(valid_emails)
-        invalid_df = pd.DataFrame(invalid_emails)
+        # Split into valid and invalid
+        valid_emails = results_df[results_df['Status'] == 'Valid']
+        invalid_emails = results_df[results_df['Status'] != 'Valid']
 
-        if file.filename.endswith('.csv'):
-            valid_output = BytesIO()
-            invalid_output = BytesIO()
-            valid_df.to_csv(valid_output, index=False, encoding='utf-8')
-            invalid_df.to_csv(invalid_output, index=False, encoding='utf-8')
-            media_type = 'text/csv'
-        else:
-            valid_output = BytesIO()
-            invalid_output = BytesIO()
-            valid_df.to_excel(valid_output, index=False)
-            invalid_df.to_excel(invalid_output, index=False)
-            media_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        # Generate filenames
+        original_name = os.path.splitext(file.filename)[0]
+        refined_filename = f"Refined - {original_name}.csv"
+        discarded_filename = f"Discarded - {original_name}.csv"
 
-        valid_output.seek(0)
-        invalid_output.seek(0)
+        # Save files
+        valid_emails.to_csv(refined_filename, index=False)
+        invalid_emails.to_csv(discarded_filename, index=False)
 
         return {
-            'status': 'success',
-            'valid_emails': {
-                'content': valid_output.getvalue().decode() if media_type == 'text/csv' else valid_output.getvalue(),
-                'filename': f'valid_{file.filename}',
-                'media_type': media_type
-            },
-            'invalid_emails': {
-                'content': invalid_output.getvalue().decode() if media_type == 'text/csv' else invalid_output.getvalue(),
-                'filename': f'invalid_{file.filename}',
-                'media_type': media_type
-            },
-            'stats': {
-                'total': len(df),
-                'valid': len(valid_emails),
-                'invalid': len(invalid_emails)
+            "validation_id": str(uuid.uuid4()),
+            "message": "Email validation completed",
+            "stats": {
+                "total_emails": len(df),
+                "valid_emails": len(valid_emails),
+                "invalid_emails": len(invalid_emails)
             }
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/download/{type}/{filename}")
-async def download_file(type: str, filename: str):
-    if type not in ['refined', 'discarded']:
-        raise HTTPException(status_code=400, detail="Invalid file type")
 
+@app.get("/download/{validation_id}/{file_type}")
+async def download_file(validation_id: str, file_type: str):
     try:
-        file_path = f"{type}_{filename}"
-        if not os.path.exists(file_path):
+        # Get original filename from the request
+        original_name = "TestBounce"  # You might want to store this with validation_id
+
+        if file_type == "refined":
+            filename = f"Refined - {original_name}.csv"
+        elif file_type == "discarded":
+            filename = f"Discarded - {original_name}.csv"
+        else:
+            raise HTTPException(status_code=400, detail="Invalid file type")
+
+        if not os.path.exists(filename):
             raise HTTPException(status_code=404, detail="File not found")
 
         return FileResponse(
-            file_path,
-            filename=f"{type}_{filename}",
-            media_type='text/csv' if filename.endswith(
-                '.csv') else 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            filename,
+            media_type='text/csv',
+            filename=filename
         )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
